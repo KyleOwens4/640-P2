@@ -104,7 +104,7 @@ def write_file(packets, filename):
     sorted_keys.sort()
 
     for key in sorted_keys:
-        data = packets[key][1]
+        data = packets[key]
         file.write(data.decode())
 
     file.close()
@@ -136,7 +136,7 @@ def request_file(socket_num, filename, window_size):
             sender_stats.bytes_rec += pack_len
 
             if pack_type != 'E':
-                packets[seq_num] = (i, data)
+                packets[seq_num] = data
                 sender_stats.packets_rec += 1
                 send_ack_packet(requester_socket, file_table[i], seq_num)
 
