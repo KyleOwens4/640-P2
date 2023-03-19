@@ -135,7 +135,7 @@ def request_file(socket_num, filename, window_size):
 
             sender_stats.bytes_rec += pack_len
 
-            if pack_type != 'E' and seq_num != 2:
+            if pack_type != 'E':
                 packets[seq_num] = (i, data)
                 sender_stats.packets_rec += 1
                 send_ack_packet(requester_socket, file_table[i], seq_num)
