@@ -32,8 +32,9 @@ def get_args():
 
 def load_file_table(filename):
     file_locations = {}
+
     try:
-        file = open('tracker.txt', 'r')
+        file = open('./requester/tracker.txt', 'r')
     except IOError as e:
         print(str(e))
         exit(-1)
@@ -70,6 +71,12 @@ def send_request_packet(requester_socket, filename, address, window_size):
     requester_socket.sendto(packet, address)
 
 
+def send_ack_packet(requester_socket, address, seq_num):
+    header = struct.pack("!cII", 'A'.encode('ascii'), seq_num, 0)
+    packet = header
+    requester_socket.sendto(packet, address)
+
+
 # def print_packet_info(sender_address, seq_num, pack_len, payload, pack_type):
 #     print(pack_type, "Packet")
 #     print('send time:      ', datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3])
@@ -93,9 +100,11 @@ def print_sender_stats(senders):
 
 def write_file(packets, filename):
     file = open(filename, 'w')
+    sorted_keys = list(packets.keys())
+    sorted_keys.sort()
 
-    for packet in packets:
-        data = packet[2]
+    for key in sorted_keys:
+        data = packets[key][1]
         file.write(data.decode())
 
     file.close()
@@ -103,7 +112,7 @@ def write_file(packets, filename):
 
 def request_file(socket_num, filename, window_size):
     requester_socket = open_listening_socket(socket_num)
-    packets = []
+    packets = {}
     senders = []
     for i in range(1, len(file_table) + 1):
         sender_stats = SenderStats()
@@ -125,16 +134,14 @@ def request_file(socket_num, filename, window_size):
             sender_stats.address = sender_address
 
             sender_stats.bytes_rec += pack_len
-            # print_packet_info(sender_address, seq_num, pack_len, data, 'DATA' if pack_type == 'D' else 'END')
 
-            if pack_type != 'E':
-                packets.append((i, seq_num, data))
+            if pack_type != 'E' and seq_num != 2:
+                packets[seq_num] = (i, data)
                 sender_stats.packets_rec += 1
+                send_ack_packet(requester_socket, file_table[i], seq_num)
 
         sender_stats.test_duration = int(time.time() * 1000) - start_time
         senders.append(sender_stats)
-
-    packets.sort()
 
     print_sender_stats(senders)
     write_file(packets, filename)
