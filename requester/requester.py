@@ -1,9 +1,9 @@
 import argparse
 from datetime import datetime
 import time
-import os
 import socket
 import struct
+
 
 class SenderStats:
     def __init__(self):
@@ -14,6 +14,72 @@ class SenderStats:
 
     def get_average_packets_per_second(self):
         return round(self.packets_rec / (self.test_duration / 1000))
+
+
+class Packet:
+    def __init__(self, packet, sender_address):
+        self.type, self.seq_num, self.length = struct.unpack("!cII", packet[:9])
+        self.type = str(self.type, 'UTF-8')
+        self.seq_num = socket.ntohl(self.seq_num)
+
+        self.data = packet[9:]
+        self.data = self.data.decode() if len(self.data) > 0 else ''
+
+        self.sender_address = sender_address
+
+    def print_packet_info(self):
+        print('END', "Packet")
+        print('send time:      ', datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3])
+        print('sender addr:    ', self.sender_address[0] + ':' + str(self.sender_address[1]))
+        print('sequence:       ', self.seq_num)
+        print('length:         ', self.length)
+        print('payload:        ', self.data[:4])
+        print()
+
+
+class RequestSocket:
+    def __init__(self, listening_port_num, filename, window_size, file_table):
+        self.listen_address = (socket.gethostbyname(socket.gethostname()), listening_port_num)
+
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(self.listen_address)
+        self.socket.settimeout(20)
+
+        self.filename = filename
+        self.window_size = window_size
+        self.file_table = file_table
+
+    def convert_ip_to_int(self, ip_string):
+        return struct.unpack("!L", socket.inet_aton(ip_string))[0]
+
+
+    def create_outer_header(self, file_portion):
+        int_src_ip = self.convert_ip_to_int(self.listen_address[0])
+        int_dest_ip = self.convert_ip_to_int(file_table[file_portion][0])
+        dest_port = file_table[file_portion][1]
+
+        return struct.pack("!BIHIHI", 1, int_src_ip, self.listen_address[1], int_dest_ip, dest_port, 9)
+
+
+    def send_request_packet(self, file_portion):
+        inner_header = struct.pack("!cII", 'R'.encode('ascii'), 0, self.window_size)
+        inner_packet = inner_header + self.filename.encode()
+
+        outer_header = self.create_outer_header(file_portion)
+        packet = outer_header + inner_packet
+
+        self.socket.sendto(packet, file_table[file_portion])
+
+    def send_ack_packet(self, file_portion, seq_num):
+        inner_header = struct.pack("!cII", 'A'.encode('ascii'), socket.htonl(seq_num), 0)
+        outer_header = self.create_outer_header(file_portion)
+
+        packet = outer_header + inner_header
+        self.socket.sendto(packet, file_table[file_portion])
+
+    def await_data(self):
+        packet, sender_address = self.socket.recvfrom(5300)
+        return Packet(packet, sender_address)
 
 
 def get_args():
@@ -34,7 +100,7 @@ def load_file_table(filename):
     file_locations = {}
 
     try:
-        file = open('./requester/tracker.txt', 'r')
+        file = open('tracker.txt', 'r')
     except IOError as e:
         print(str(e))
         exit(-1)
@@ -47,44 +113,6 @@ def load_file_table(filename):
             file_locations[int(cols[1])] = (socket.gethostbyname(cols[2]), int(cols[3].strip()))
 
     return file_locations
-
-
-def open_listening_socket(socket_num):
-    listen_address = (socket.gethostbyname(socket.gethostname()), socket_num)
-
-    new_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    new_socket.bind(listen_address)
-    new_socket.settimeout(20)
-
-    return new_socket
-
-
-def deconstruct_header(header):
-    req_type, seq, data_len = struct.unpack("!cII", header)
-
-    return str(req_type, 'UTF-8'), socket.ntohl(seq), data_len
-
-
-def send_request_packet(requester_socket, filename, address, window_size):
-    header = struct.pack("!cII", 'R'.encode('ascii'), 0, window_size)
-    packet = header + filename.encode()
-    requester_socket.sendto(packet, address)
-
-
-def send_ack_packet(requester_socket, address, seq_num):
-    header = struct.pack("!cII", 'A'.encode('ascii'), seq_num, 0)
-    packet = header
-    requester_socket.sendto(packet, address)
-
-
-# def print_packet_info(sender_address, seq_num, pack_len, payload, pack_type):
-#     print(pack_type, "Packet")
-#     print('send time:      ', datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3])
-#     print('sender addr:    ', sender_address[0] + ':' + str(sender_address[1]))
-#     print('sequence:       ', seq_num)
-#     print('length:         ', pack_len)
-#     print('payload:        ', payload.decode()[:4])
-#     print()
 
 
 def print_sender_stats(senders):
@@ -105,46 +133,45 @@ def write_file(packets, filename):
 
     for key in sorted_keys:
         data = packets[key]
-        file.write(data.decode())
+        file.write(data)
 
     file.close()
 
 
-def request_file(socket_num, filename, window_size):
-    requester_socket = open_listening_socket(socket_num)
-    packets = {}
-    senders = []
-    for i in range(1, len(file_table) + 1):
-        sender_stats = SenderStats()
-        send_request_packet(requester_socket, filename, file_table[i], window_size)
-        pack_type = "TBD"
+def request_file(request_socket):
 
+    file_data = {}
+    senders = []
+
+    for file_portion in range(1, len(file_table) + 1):
+        sender_stats = SenderStats()
         start_time = int(time.time() * 1000)
-        while pack_type != 'E':
+
+        request_socket.send_request_packet(file_portion)
+        while True:
             try:
-                packet, sender_address = requester_socket.recvfrom(5300)
+                packet = request_socket.await_data()
             except TimeoutError:
                 print('Detected lost packet after 20 seconds. Please try again')
                 exit(-1)
 
-            pack_type, seq_num, pack_len = deconstruct_header(packet[:9])
-            data = packet[9:]
-            data = data if len(data) > 0 else ''.encode()
+            sender_stats.address = packet.sender_address
+            sender_stats.bytes_rec += packet.length
 
-            sender_stats.address = sender_address
+            if packet.type == 'E':
+                packet.print_packet_info()
+                break
 
-            sender_stats.bytes_rec += pack_len
-
-            if pack_type != 'E':
-                packets[seq_num] = data
+            if packet.type != 'E':
+                file_data[packet.seq_num] = packet.data
                 sender_stats.packets_rec += 1
-                send_ack_packet(requester_socket, file_table[i], seq_num)
+                request_socket.send_ack_packet(file_portion, packet.seq_num)
 
         sender_stats.test_duration = int(time.time() * 1000) - start_time
         senders.append(sender_stats)
 
     print_sender_stats(senders)
-    write_file(packets, filename)
+    write_file(file_data, request_socket.filename)
 
 
 if __name__ == '__main__':
@@ -155,5 +182,6 @@ if __name__ == '__main__':
         print("File was not found in the tracker")
         exit(-1)
 
-    request_file(args.p, args.o, args.w)
+    request_socket = RequestSocket(args.p, args.o, args.w, file_table)
+    request_file(request_socket)
 
