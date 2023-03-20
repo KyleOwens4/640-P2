@@ -18,11 +18,15 @@ class SenderStats:
 
 class Packet:
     def __init__(self, packet, sender_address):
-        self.type, self.seq_num, self.length = struct.unpack("!cII", packet[:9])
+        outer_header = packet[:17]
+        inner_header = packet[17:26]
+
+        self.priority, self.src_ip, self.src_port, self.dest_ip, self.dest_port, self.outer_length = struct.unpack("!BIHIHI", outer_header)
+        self.type, self.seq_num, self.length = struct.unpack("!cII", inner_header)
         self.type = str(self.type, 'UTF-8')
         self.seq_num = socket.ntohl(self.seq_num)
 
-        self.data = packet[9:]
+        self.data = packet[26:]
         self.data = self.data.decode() if len(self.data) > 0 else ''
 
         self.sender_address = sender_address
@@ -38,8 +42,9 @@ class Packet:
 
 
 class RequestSocket:
-    def __init__(self, listening_port_num, filename, window_size, file_table):
+    def __init__(self, listening_port_num, filename, window_size, file_table, emulator_address):
         self.listen_address = (socket.gethostbyname(socket.gethostname()), listening_port_num)
+        self.emulator_address = emulator_address
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(self.listen_address)
@@ -52,14 +57,12 @@ class RequestSocket:
     def convert_ip_to_int(self, ip_string):
         return struct.unpack("!L", socket.inet_aton(ip_string))[0]
 
-
     def create_outer_header(self, file_portion):
         int_src_ip = self.convert_ip_to_int(self.listen_address[0])
         int_dest_ip = self.convert_ip_to_int(file_table[file_portion][0])
         dest_port = file_table[file_portion][1]
 
         return struct.pack("!BIHIHI", 1, int_src_ip, self.listen_address[1], int_dest_ip, dest_port, 9)
-
 
     def send_request_packet(self, file_portion):
         inner_header = struct.pack("!cII", 'R'.encode('ascii'), 0, self.window_size)
@@ -68,14 +71,14 @@ class RequestSocket:
         outer_header = self.create_outer_header(file_portion)
         packet = outer_header + inner_packet
 
-        self.socket.sendto(packet, file_table[file_portion])
+        self.socket.sendto(packet, emulator_address)
 
     def send_ack_packet(self, file_portion, seq_num):
         inner_header = struct.pack("!cII", 'A'.encode('ascii'), socket.htonl(seq_num), 0)
         outer_header = self.create_outer_header(file_portion)
 
         packet = outer_header + inner_header
-        self.socket.sendto(packet, file_table[file_portion])
+        self.socket.sendto(packet, emulator_address)
 
     def await_data(self):
         packet, sender_address = self.socket.recvfrom(5300)
@@ -83,7 +86,8 @@ class RequestSocket:
 
 
 def get_args():
-    parser = argparse.ArgumentParser(usage="sender.py -p <port> -g <requester port> -r <rate> -q <seq_no> -l <length>")
+    parser = argparse.ArgumentParser(usage="requester.py -p <port> -o <file option> -f <f_hostname> -e <f_port> "
+                                           "-w <window>")
 
     parser.add_argument('-p', choices=range(2050, 65536), type=int,
                         help='Port number on which to wait for packets', required=True)
@@ -182,6 +186,7 @@ if __name__ == '__main__':
         print("File was not found in the tracker")
         exit(-1)
 
-    request_socket = RequestSocket(args.p, args.o, args.w, file_table)
+    emulator_address = (socket.gethostbyname(args.f), args.e)
+    request_socket = RequestSocket(args.p, args.o, args.w, file_table, emulator_address)
     request_file(request_socket)
 
