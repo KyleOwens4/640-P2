@@ -66,10 +66,14 @@ class IncomingPacket:
 
 
 class SenderSocket:
-    def __init__(self, listening_port_num):
+    def __init__(self, listening_port_num, emulator_address):
         self.listen_address = (socket.gethostbyname(socket.gethostname()), listening_port_num)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(self.listen_address)
+        self.emulator_address = emulator_address
+
+        self.total_retransmissions = 0
+        self.total_transmissions = 0
 
     def await_file_request(self, req_sock_num):
         full_packet, requester_address = self.socket.recvfrom(5500)
@@ -82,9 +86,14 @@ class SenderSocket:
 
         return IncomingPacket(full_packet, requester_address)
 
-    def send_packet(self, packet):
+    def send_packet(self, packet, transmission_type = 'I'):
+        if (transmission_type == 'R'):
+            self.total_retransmissions += 1
+
+        self.total_transmissions += 1
+
         packet.sent_time = int(time.time() * 1000)
-        self.socket.sendto(packet.packet, packet.destination_address)
+        self.socket.sendto(packet.packet, self.emulator_address)
 
     def settimeout(self, timeout):
         self.socket.settimeout(timeout)
@@ -131,7 +140,7 @@ def await_acks(sent_packets, sender_socket, timeout, packet_rate):
             elif int(time.time() * 1000) - outgoing_packet.sent_time > timeout:
                 outgoing_packet.attempts += 1
                 send_time = int(time.time() * 1000)
-                sender_socket.send_packet(outgoing_packet)
+                sender_socket.send_packet(outgoing_packet, 'R')
 
                 while int(time.time() * 1000) < send_time + packet_rate:
                     pass
@@ -175,12 +184,16 @@ def send_file(sender_socket, request_packet, args):
     packet = OutgoingPacket(args.i, 'E', seq_num, '', sender_socket.listen_address, request_packet.requester_address)
     packet.print_packet_info()
     sender_socket.send_packet(packet)
+    print('Packet Loss Rate: ' + str((sender_socket.total_retransmissions / (sender_socket.total_transmissions) * 100))
+          + '% on ' + str(sender_socket.total_retransmissions) + ' retransmissions and '
+          + str(sender_socket.total_transmissions) + ' total transmissions')
 
 
 if __name__ == '__main__':
     args = get_args()
 
-    sender_socket = SenderSocket(args.p)
+    emulator_address = (socket.gethostbyname(args.f), args.e)
+    sender_socket = SenderSocket(args.p, emulator_address)
     request_packet = sender_socket.await_file_request(args.g)
 
     send_file(sender_socket, request_packet, args)

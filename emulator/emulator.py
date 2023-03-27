@@ -1,7 +1,10 @@
 import argparse
+import logging
+import random
 import socket
 import struct
 import time
+from datetime import datetime
 
 
 class ForwardingEntry:
@@ -25,13 +28,22 @@ class ForwardingQueue:
         self.delayed_packet = None
         self.delay_start = None
 
-    def queue_packet(self, packet, delay):
-        if packet.priority == 1 and len(self.priority_queue1) < self.max_size:
-            self.priority_queue1.append([packet, delay])
-        elif packet.priority == 2 and len(self.priority_queue2) < self.max_size:
-            self.priority_queue2.append([packet, delay])
-        elif packet.priority == 3 and len(self.priority_queue3) < self.max_size:
-            self.priority_queue3.append([packet, delay])
+    def queue_packet(self, packet, delay, drop_prob):
+        if packet.priority == 1:
+            if len(self.priority_queue1) < self.max_size:
+                self.priority_queue1.append([packet, delay, drop_prob])
+            else:
+                log_event('Priority queue 1 was full', packet)
+        elif packet.priority == 2:
+            if len(self.priority_queue2) < self.max_size:
+                self.priority_queue2.append([packet, delay, drop_prob])
+            else:
+                log_event('Priority queue 2 was full', packet)
+        elif packet.priority == 3:
+            if len(self.priority_queue3) < self.max_size:
+                self.priority_queue3.append([packet, delay, drop_prob])
+            else:
+                log_event('Priority queue 3 was full', packet)
 
     def get_next_packet(self):
         if len(self.priority_queue1) > 0:
@@ -51,6 +63,8 @@ class ForwardingQueue:
         if self.delayed_packet is not None:
             if int(time.time() * 1000) - self.delay_start >= self.delayed_packet[1]:
                 packet = self.delayed_packet[0]
+                packet.drop_prob = self.delayed_packet[2]
+
                 self.delayed_packet = None
                 self.delay_start = None
 
@@ -66,6 +80,7 @@ class Packet:
 
         self.priority, self.int_src_ip, self.src_port, self.int_dest_ip, self.dest_port, self.outer_length = struct.unpack("!BIHIHI", outer_header)
         self.src_ip = self.convert_int_to_ip(self.int_src_ip)
+        self.src_hostname = socket.gethostbyaddr(self.src_ip)[0]
         self.dest_ip = self.convert_int_to_ip(self.int_dest_ip)
         self.dest_hostname = socket.gethostbyaddr(self.dest_ip)[0]
 
@@ -79,6 +94,7 @@ class Packet:
         self.from_address = from_address
         self.packet = packet
         self.next_hop_address = None
+        self.drop_prob = 0
 
     def convert_int_to_ip(self, int_ip):
         return socket.inet_ntoa(struct.pack('!L', int_ip))
@@ -112,6 +128,17 @@ def get_args():
     return parser.parse_args()
 
 
+def log_event(message, packet):
+    logging.warning('reason: ' + message +
+                    ' source host: ' + packet.src_hostname +
+                    ' source port: ' + str(packet.src_port) +
+                    ' dest host: ' + packet.dest_hostname +
+                    ' dest port: ' + str(packet.dest_port) +
+                    ' time of loss: ' + str(datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]) +
+                    ' priority level: ' + str(packet.priority) +
+                    ' payload size: ' + str(packet.outer_length))
+
+
 def load_forwarding_table(filename, port):
     forwarding_entries = []
 
@@ -140,30 +167,45 @@ def get_forwarding_entry(packet, forwarding_table):
     return None
 
 
+def should_send(outgoing_packet):
+    if outgoing_packet is None:
+        return False
+
+    if outgoing_packet.type == 'E':
+        return True
+
+    if random.randint(1, 100) <= int(outgoing_packet.drop_prob):
+        log_event('Loss event occurred', outgoing_packet)
+        return False
+
+    return True
+
+
 def listen_for_packets(forwarding_table, emulator_socket, args):
     forwarding_queue = ForwardingQueue(args.q)
 
-    print(args.q)
     while True:
         try:
             incoming_packet = emulator_socket.await_packet()
 
             forwarding_entry = get_forwarding_entry(incoming_packet, forwarding_table)
             if forwarding_entry is not None:
-                forwarding_queue.queue_packet(incoming_packet, forwarding_entry.delay)
+                forwarding_queue.queue_packet(incoming_packet, forwarding_entry.delay, forwarding_entry.loss_probability)
             else:
-                print('would log no forwarding here')
+                log_event('No forwarding entry found', incoming_packet)
 
         except BlockingIOError as e:
             pass
 
         outgoing_packet = forwarding_queue.update_queue()
-        if outgoing_packet is not None:
+        if should_send(outgoing_packet):
             emulator_socket.send_packet(outgoing_packet)
+
 
 if __name__ == '__main__':
     args = get_args()
 
+    logging.basicConfig(filename=args.l, encoding='utf-8', filemode='w')
     forwarding_table = load_forwarding_table(args.f, args.p)
 
     listen_for_packets(forwarding_table, EmulatorSocket(args.p), args)
