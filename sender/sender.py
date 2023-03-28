@@ -32,9 +32,10 @@ class OutgoingPacket:
     def create_outer_header(self):
         int_src_ip = self.convert_ip_to_int(self.source_address[0])
         int_dest_ip = self.convert_ip_to_int(self.destination_address[0])
+        src_port = self.source_address[1]
         dest_port = self.destination_address[1]
 
-        return struct.pack("!BIHIHI", self.priority, int_src_ip, self.source_address[1], int_dest_ip, dest_port, 9 + self.length)
+        return struct.pack("!BIHIHI", self.priority, int_src_ip, src_port, int_dest_ip, dest_port, 9 + self.length)
 
     def print_packet_info(self):
         pack_type = 'DATA' if self.type == 'D' else 'END'
@@ -50,19 +51,43 @@ class OutgoingPacket:
 
 
 class IncomingPacket:
-    def __init__(self, packet, requester_address):
+    def __init__(self, packet):
         outer_header = packet[:17]
         inner_header = packet[17:26]
 
         self.priority, self.src_ip, self.src_port, self.dest_ip, self.dest_port, self.outer_length = struct.unpack("!BIHIHI", outer_header)
         self.type, self.seq_num, self.length = struct.unpack("!cII", inner_header)
+
         self.type = str(self.type, 'UTF-8')
         self.seq_num = socket.ntohl(self.seq_num)
 
         self.data = packet[26:]
         self.data = self.data.decode() if len(self.data) > 0 else ''
 
-        self.requester_address = requester_address
+        self.requester_address = (self.convert_int_to_ip(self.src_ip), self.src_port)
+
+        if args.d:
+            self.print_debug_info()
+
+    def convert_int_to_ip(self, int_ip):
+        return socket.inet_ntoa(struct.pack('!L', int_ip))
+
+    def print_debug_info(self):
+        print('==============INCOMING PACKET===============')
+        print('Priority         ' + str(self.priority))
+        print('Source IP        ' + str(self.src_ip))
+        print('Source Port      ' + str(self.src_port))
+        print('Destination IP   ' + str(self.dest_ip))
+        print('Destination Port ' + str(self.dest_port))
+        print('Outer Packet Len ' + str(self.outer_length))
+        print('Type             ' + str(self.type))
+        print('Sequence Number  ' + str(self.seq_num))
+        print('Inner Packet Len ' + str(self.length))
+        print('Data:            ' + str(self.data[:4]))
+        print('Requester Addr   ' + str(self.requester_address[0]))
+        print('Requester Port   ' + str(self.requester_address[1]))
+        print('============================================')
+        print('')
 
 
 class SenderSocket:
@@ -70,21 +95,20 @@ class SenderSocket:
         self.listen_address = (socket.gethostbyname(socket.gethostname()), listening_port_num)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(self.listen_address)
-        self.emulator_address = emulator_address
 
+        self.emulator_address = emulator_address
         self.total_retransmissions = 0
         self.total_transmissions = 0
 
-    def await_file_request(self, req_sock_num):
+    def await_file_request(self):
         full_packet, requester_address = self.socket.recvfrom(5500)
-        requester_address = (requester_address[0], req_sock_num)
 
-        return IncomingPacket(full_packet, requester_address)
+        return IncomingPacket(full_packet)
 
     def await_ack(self):
         full_packet, requester_address = self.socket.recvfrom(5500)
 
-        return IncomingPacket(full_packet, requester_address)
+        return IncomingPacket(full_packet)
 
     def send_packet(self, packet, transmission_type = 'I'):
         if (transmission_type == 'R'):
@@ -114,7 +138,7 @@ def get_args():
     parser.add_argument('-e', choices=range(2050, 65536), type=int, help='the port of the emulator.', required=True)
     parser.add_argument('-i', choices=range(1, 4), type=int, help='Priority level to send packets at.', required=True)
     parser.add_argument('-t', type=int, help='Timeout for retransmission for lost packs in milliseconds', required=True)
-
+    parser.add_argument('-d', type=bool, default=False, help='Debug mode', required=False)
     return parser.parse_args()
 
 
@@ -132,18 +156,19 @@ def await_acks(sent_packets, sender_socket, timeout, packet_rate):
 
         for key in list(sent_packets.keys()):
             outgoing_packet = sent_packets[key]
-            if outgoing_packet.attempts >= 6:
-                print("ERROR: Attempted sending packet with sequence number " + str(outgoing_packet.seq_num)
-                      + " six total times without acknowledgement. Packet dropped.")
-                print("")
-                del sent_packets[key]
-            elif int(time.time() * 1000) - outgoing_packet.sent_time > timeout:
-                outgoing_packet.attempts += 1
-                send_time = int(time.time() * 1000)
-                sender_socket.send_packet(outgoing_packet, 'R')
+            if int(time.time() * 1000) - outgoing_packet.sent_time > timeout:
+                if outgoing_packet.attempts >= 6:
+                    print("ERROR: Attempted sending packet with sequence number " + str(outgoing_packet.seq_num)
+                          + " six total times without acknowledgement. Packet dropped.")
+                    print("")
+                    del sent_packets[key]
+                else:
+                    outgoing_packet.attempts += 1
+                    send_time = int(time.time() * 1000)
+                    sender_socket.send_packet(outgoing_packet, 'R')
 
-                while int(time.time() * 1000) < send_time + packet_rate:
-                    pass
+                    while int(time.time() * 1000) < send_time + packet_rate:
+                        pass
 
 
 def send_file(sender_socket, request_packet, args):
@@ -184,7 +209,8 @@ def send_file(sender_socket, request_packet, args):
     packet = OutgoingPacket(args.i, 'E', seq_num, '', sender_socket.listen_address, request_packet.requester_address)
     packet.print_packet_info()
     sender_socket.send_packet(packet)
-    print('Packet Loss Rate: ' + str((sender_socket.total_retransmissions / (sender_socket.total_transmissions) * 100))
+
+    print('Packet Loss Rate: ' + str((sender_socket.total_retransmissions / sender_socket.total_transmissions) * 100)
           + '% on ' + str(sender_socket.total_retransmissions) + ' retransmissions and '
           + str(sender_socket.total_transmissions) + ' total transmissions')
 
@@ -194,7 +220,7 @@ if __name__ == '__main__':
 
     emulator_address = (socket.gethostbyname(args.f), args.e)
     sender_socket = SenderSocket(args.p, emulator_address)
-    request_packet = sender_socket.await_file_request(args.g)
+    request_packet = sender_socket.await_file_request()
 
     send_file(sender_socket, request_packet, args)
 

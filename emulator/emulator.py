@@ -91,13 +91,36 @@ class Packet:
         self.data = packet[26:]
         self.data = self.data.decode() if len(self.data) > 0 else ''
 
-        self.from_address = from_address
         self.packet = packet
+        self.from_address = from_address
         self.next_hop_address = None
         self.drop_prob = 0
 
+        if args.d:
+            self.print_debug_info()
+
     def convert_int_to_ip(self, int_ip):
         return socket.inet_ntoa(struct.pack('!L', int_ip))
+
+    def print_debug_info(self):
+        print('==============INCOMING PACKET===============')
+        print('Priority         ' + str(self.priority))
+        print('Source Name      ' + str(self.src_hostname))
+        print('Source IP        ' + str(self.src_ip))
+        print('Source Port      ' + str(self.src_port))
+        print('Destination Name ' + str(self.dest_hostname))
+        print('Destination IP   ' + str(self.dest_ip))
+        print('Destination Port ' + str(self.dest_port))
+        print('Outer Packet Len ' + str(self.outer_length))
+        print('Type             ' + str(self.type))
+        print('Sequence Number  ' + str(self.seq_num))
+        print('Inner Packet Len ' + str(self.length))
+        print('Data:            ' + str(self.data[:4]))
+        print('From Addr        ' + str(self.from_address[0]))
+        print('From Port        ' + str(self.from_address[1]))
+        print('============================================')
+        print('')
+
 
 
 class EmulatorSocket:
@@ -111,9 +134,9 @@ class EmulatorSocket:
         self.socket.sendto(packet.packet, packet.next_hop_address)
 
     def await_packet(self):
-        full_packet, requester_address = self.socket.recvfrom(5500)
+        full_packet, from_address = self.socket.recvfrom(5500)
 
-        return Packet(full_packet, requester_address)
+        return Packet(full_packet, from_address)
 
 
 def get_args():
@@ -124,6 +147,7 @@ def get_args():
     parser.add_argument('-q', type=int, help='Size of each queue', required=True)
     parser.add_argument('-f', type=str, help='Name of the file containing the static forwarding table', required=True)
     parser.add_argument('-l', type=str, help='Name of the log file', required=True)
+    parser.add_argument('-d', type=bool, default=False, help='Debug mode', required=False)
 
     return parser.parse_args()
 
